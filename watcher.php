@@ -68,65 +68,82 @@ function nullStr($v) {
     return ($v !== null) ? (string)$v : null;
 }
 
-function convexUpsert($baseUrl, $args) {
-    // Remove null values — Convex optional fields must be absent, not null
-    foreach ($args as $k => $v) {
-        if ($v === null) unset($args[$k]);
-    }
-
-    $body = json_encode(array(
-        'path'   => 'prod_activ:upsert',
-        'args'   => $args,
-        'format' => 'json',
-    ));
-
+/** POST JSON to Convex via Windows curl.exe. Returns decoded response or false. */
+function convexPost($url, $payload) {
+    $body = json_encode($payload);
     if ($body === false) {
         fwrite(STDERR, "  [json error] " . json_last_error_msg() . "\n");
         return false;
     }
 
-    $url = $baseUrl . '/api/mutation';
+    $tmpIn  = tempnam(sys_get_temp_dir(), 'cvx');
+    $tmpOut = tempnam(sys_get_temp_dir(), 'cvr');
+    file_put_contents($tmpIn, $body);
 
-    // Use Windows built-in curl.exe (System32) — no PHP extensions needed at all
-    $tmpFile = tempnam(sys_get_temp_dir(), 'cvx');
-    file_put_contents($tmpFile, $body);
-
-    $cmd = 'curl.exe -s -o NUL -w "%{http_code}" '
+    $cmd = 'curl.exe -s -w "\n%{http_code}" '
          . '-X POST '
          . '-H "Content-Type: application/json" '
-         . '-d @' . escapeshellarg(str_replace('/', '\\', $tmpFile)) . ' '
+         . '-d @' . escapeshellarg(str_replace('/', '\\', $tmpIn)) . ' '
          . '--max-time 15 '
+         . '-o ' . escapeshellarg(str_replace('/', '\\', $tmpOut)) . ' '
          . escapeshellarg($url)
          . ' 2>&1';
 
     $output = array();
     $exitCode = 0;
     exec($cmd, $output, $exitCode);
-    @unlink($tmpFile);
+    @unlink($tmpIn);
 
-    $httpCode = isset($output[0]) ? trim($output[0]) : '0';
+    $respBody = @file_get_contents($tmpOut);
+    @unlink($tmpOut);
+
+    $httpCode = isset($output[0]) ? (int)trim($output[0]) : 0;
 
     if ($exitCode !== 0) {
         fwrite(STDERR, "  [curl.exe exit " . $exitCode . "] " . implode(' ', $output) . "\n");
         return false;
     }
-
-    $code = (int)$httpCode;
-    if ($code < 200 || $code >= 300) {
-        fwrite(STDERR, "  [http " . $code . "]\n");
+    if ($httpCode < 200 || $httpCode >= 300) {
+        fwrite(STDERR, "  [http " . $httpCode . "] " . $respBody . "\n");
         return false;
     }
-    return true;
+
+    $decoded = json_decode($respBody, true);
+    return ($decoded !== null) ? $decoded : true;
+}
+
+function convexMutation($baseUrl, $path, $args) {
+    foreach ($args as $k => $v) {
+        if ($v === null) unset($args[$k]);
+    }
+    return convexPost($baseUrl . '/api/mutation', array(
+        'path'   => $path,
+        'args'   => $args,
+        'format' => 'json',
+    ));
+}
+
+function convexQuery($baseUrl, $path, $args) {
+    return convexPost($baseUrl . '/api/query', array(
+        'path'   => $path,
+        'args'   => $args,
+        'format' => 'json',
+    ));
 }
 
 // ---------------------------------------------------------------------------
-// Poll loop — uses query() with integer cast; no get_result()/mysqlnd needed
+// Poll loop
 // ---------------------------------------------------------------------------
 set_time_limit(0);
 
-$totalSynced = 0;
+$totalSynced   = 0;
+$pollCount     = 0;
+$DELETE_CHECK_EVERY = (int) env('DELETE_CHECK_EVERY', '10'); // check deletes every N polls
 
 while (true) {
+    $pollCount++;
+
+    // --- 1. Upsert new / changed rows ---
     $safeId = (int)$lastMaxId;
     $result = $db->query("SELECT * FROM prod_activ WHERE ID > " . $safeId . " ORDER BY ID ASC");
 
@@ -167,12 +184,52 @@ while (true) {
                 'Suplimente' => toNum($r['Suplimente']),
             );
 
-            if (convexUpsert($CONVEX_URL, $args)) {
+            if (convexMutation($CONVEX_URL, 'prod_activ:upsert', $args)) {
                 $totalSynced++;
                 echo "  -> upserted ID " . $id . " (total: " . $totalSynced . ")\n";
                 if ($id > $lastMaxId) $lastMaxId = $id;
             } else {
                 fwrite(STDERR, "  [error] failed to upsert ID " . $id . ", will retry next poll\n");
+            }
+        }
+    }
+
+    // --- 2. Soft-delete: check every N polls for rows deleted from MySQL ---
+    if ($pollCount % $DELETE_CHECK_EVERY === 0) {
+        $convexIds = convexQuery($CONVEX_URL, 'prod_activ:listActiveMysqlIds', array());
+
+        if (is_array($convexIds) && isset($convexIds['value']) && is_array($convexIds['value'])) {
+            $activeInConvex = $convexIds['value'];
+        } elseif (is_array($convexIds) && !isset($convexIds['value'])) {
+            $activeInConvex = $convexIds;
+        } else {
+            $activeInConvex = null;
+        }
+
+        if (is_array($activeInConvex) && count($activeInConvex) > 0) {
+            // Get all current MySQL IDs as a lookup set
+            $mysqlIdResult = $db->query("SELECT ID FROM prod_activ");
+            $mysqlIds = array();
+            if ($mysqlIdResult) {
+                while ($row = $mysqlIdResult->fetch_assoc()) {
+                    $mysqlIds[(int)$row['ID']] = true;
+                }
+                $mysqlIdResult->free();
+            }
+
+            $archiveCount = 0;
+            foreach ($activeInConvex as $cid) {
+                $cid = (int)$cid;
+                if (!isset($mysqlIds[$cid])) {
+                    $res = convexMutation($CONVEX_URL, 'prod_activ:softDelete', array('mysql_id' => $cid));
+                    if ($res !== false) {
+                        $archiveCount++;
+                        echo "  [archive] soft-deleted mysql_id " . $cid . " (removed from MySQL)\n";
+                    }
+                }
+            }
+            if ($archiveCount > 0) {
+                echo "[delete-sync] Archived " . $archiveCount . " row(s) not found in MySQL\n";
             }
         }
     }
