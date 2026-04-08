@@ -1,0 +1,16 @@
+{
+  "name": "mysql-convex-watcher",
+  "type": "module",
+  "scripts": {
+    "start": "node watcher.js",
+    "convex:codegen": "npx convex codegen",
+    "convex:dev": "npx convex dev",
+    "convex:deploy": "npx convex deploy",
+    "convex:deploy:prod": "npx convex deploy --prod"
+  },
+  "dependencies": {
+    "convex": "^1.0.0",
+    "dotenv": "^16.4.5",
+    "mysql2": "^3.0.0"
+  }
+}
