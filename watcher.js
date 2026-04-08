@@ -9,11 +9,20 @@ const CONVEX_URL =
   process.env.CONVEX_URL ?? "https://youthful-cobra-798.convex.cloud";
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS) || 3000;
 
+const mysqlSsl =
+  process.env.MYSQL_SSL === "1" || process.env.MYSQL_SSL === "true"
+    ? { rejectUnauthorized: process.env.MYSQL_SSL_REJECT_UNAUTHORIZED !== "0" }
+    : undefined;
+
 const db = await mysql.createConnection({
   host: process.env.MYSQL_HOST ?? "192.168.0.21",
   user: process.env.MYSQL_USER ?? "ivan",
   password: process.env.MYSQL_PASSWORD ?? "sotazero",
   database: process.env.MYSQL_DATABASE ?? "prazno",
+  // MySQL 8+ caching_sha2_password over TCP often needs this without TLS (typical on LAN).
+  allowPublicKeyRetrieval:
+    process.env.MYSQL_ALLOW_PUBLIC_KEY_RETRIEVAL !== "0",
+  ssl: mysqlSsl,
 });
 
 const convex = new ConvexHttpClient(CONVEX_URL);
