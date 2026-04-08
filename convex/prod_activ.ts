@@ -30,9 +30,9 @@ export const upsert = mutation({
       .unique();
 
     if (existing) {
-      await ctx.db.patch(existing._id, { ...args, _archived: false, _archivedAt: undefined });
+      await ctx.db.patch(existing._id, { ...args, archived: false, archivedAt: undefined });
     } else {
-      await ctx.db.insert("prod_activ", { ...args, _archived: false });
+      await ctx.db.insert("prod_activ", { ...args, archived: false });
     }
   },
 });
@@ -42,7 +42,7 @@ export const listActiveMysqlIds = query({
   handler: async (ctx) => {
     const all = await ctx.db.query("prod_activ").collect();
     return all
-      .filter((r) => r._archived !== true)
+      .filter((r) => r.archived !== true)
       .map((r) => r.mysql_id);
   },
 });
@@ -55,10 +55,10 @@ export const softDelete = mutation({
       .withIndex("by_mysql_id", (q) => q.eq("mysql_id", args.mysql_id))
       .unique();
 
-    if (existing && existing._archived !== true) {
+    if (existing && existing.archived !== true) {
       await ctx.db.patch(existing._id, {
-        _archived: true,
-        _archivedAt: Date.now(),
+        archived: true,
+        archivedAt: Date.now(),
       });
       return true;
     }
