@@ -1,24 +1,25 @@
 <?php
-declare(strict_types=1);
+// PHP 5.3+ compatible
 
 // ---------------------------------------------------------------------------
-// Load .env.local (same file as watcher.js uses, no Composer needed)
+// Load .env.local
 // ---------------------------------------------------------------------------
-$envFile = __DIR__ . '/.env.local';
+$envFile = dirname(__FILE__) . '/.env.local';
 if (file_exists($envFile)) {
     foreach (file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
-        if (strncmp(trim($line), '#', 1) === 0 || strpos($line, '=') === false) continue;
-        [$key, $val] = explode('=', $line, 2);
-        $key = trim($key);
-        $val = trim(explode('#', $val, 2)[0]); // strip inline comments
+        $line = trim($line);
+        if ($line === '' || $line[0] === '#' || strpos($line, '=') === false) continue;
+        $parts = explode('=', $line, 2);
+        $key   = trim($parts[0]);
+        $val   = trim(explode('#', $parts[1], 2)[0]);
         if ($key !== '' && !isset($_ENV[$key])) {
-            putenv("$key=$val");
+            putenv($key . '=' . $val);
             $_ENV[$key] = $val;
         }
     }
 }
 
-function env(string $key, string $default = ''): string {
+function env($key, $default = '') {
     $v = getenv($key);
     return ($v !== false && $v !== '') ? $v : $default;
 }
@@ -26,56 +27,65 @@ function env(string $key, string $default = ''): string {
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-$CONVEX_URL   = env('CONVEX_URL', 'https://youthful-cobra-798.convex.cloud');
-$POLL_SLEEP   = (int) env('POLL_INTERVAL_MS', '3000');   // milliseconds
-$MYSQL_HOST   = env('MYSQL_HOST',     '192.168.0.21');
-$MYSQL_USER   = env('MYSQL_USER',     'ivan');
-$MYSQL_PASS   = env('MYSQL_PASSWORD', 'sotazero');
-$MYSQL_DB     = env('MYSQL_DATABASE', 'prazno');
+$CONVEX_URL = env('CONVEX_URL', 'https://youthful-cobra-798.convex.cloud');
+$POLL_SLEEP = (int) env('POLL_INTERVAL_MS', '3000');
+$MYSQL_HOST = env('MYSQL_HOST',     '192.168.0.21');
+$MYSQL_USER = env('MYSQL_USER',     'ivan');
+$MYSQL_PASS = env('MYSQL_PASSWORD', 'sotazero');
+$MYSQL_DB   = env('MYSQL_DATABASE', 'prazno');
 
 // ---------------------------------------------------------------------------
-// MySQL connection (uses libmysqlclient — no auth-plugin issues)
+// MySQL connection
 // ---------------------------------------------------------------------------
 $db = new mysqli($MYSQL_HOST, $MYSQL_USER, $MYSQL_PASS, $MYSQL_DB);
 if ($db->connect_errno) {
-    fwrite(STDERR, "[fatal] MySQL connect failed: {$db->connect_error}\n");
+    fwrite(STDERR, "[fatal] MySQL connect failed: " . $db->connect_error . "\n");
     exit(1);
 }
 $db->set_charset('utf8mb4');
 
 // ---------------------------------------------------------------------------
-// Init: start from current max ID so we don't replay history on startup
+// Init: start from current max ID
 // ---------------------------------------------------------------------------
-$row = $db->query("SELECT MAX(ID) AS maxId FROM prod_activ")->fetch_assoc();
-$lastMaxId = (int)($row['maxId'] ?? 0);
-echo "[init] Starting from ID > {$lastMaxId}\n";
+$initResult = $db->query("SELECT MAX(ID) AS maxId FROM prod_activ");
+$initRow    = $initResult->fetch_assoc();
+$lastMaxId  = isset($initRow['maxId']) ? (int)$initRow['maxId'] : 0;
+echo "[init] Starting from ID > " . $lastMaxId . "\n";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-function num(?string $v): ?float {
-    return $v !== null ? (float)$v : null;
+function toNum($v) {
+    return ($v !== null) ? (float)$v : null;
 }
 
-/** POST a mutation to Convex and return true on success. */
-function convexUpsert(string $baseUrl, array $args): bool {
-    // Strip null values — Convex optional fields must be absent, not null
-    $args = array_filter($args, function($v) { return $v !== null; });
+function nullStr($v) {
+    return ($v !== null) ? (string)$v : null;
+}
 
-    $body = json_encode([
-        'path' => 'prod_activ:upsert',
-        'args' => $args,
+function convexUpsert($baseUrl, $args) {
+    // Remove null values — Convex optional fields must be absent, not null
+    foreach ($args as $k => $v) {
+        if ($v === null) unset($args[$k]);
+    }
+
+    $body = json_encode(array(
+        'path'   => 'prod_activ:upsert',
+        'args'   => $args,
         'format' => 'json',
-    ], JSON_THROW_ON_ERROR);
+    ));
 
-    $ch = curl_init("{$baseUrl}/api/mutation");
-    curl_setopt_array($ch, [
-        CURLOPT_POST           => true,
-        CURLOPT_POSTFIELDS     => $body,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
-        CURLOPT_TIMEOUT        => 10,
-    ]);
+    if ($body === false) {
+        fwrite(STDERR, "  [json error] " . json_last_error_msg() . "\n");
+        return false;
+    }
+
+    $ch = curl_init($baseUrl . '/api/mutation');
+    curl_setopt($ch, CURLOPT_POST,           true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS,     $body);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER,     array('Content-Type: application/json'));
+    curl_setopt($ch, CURLOPT_TIMEOUT,        10);
 
     $resp     = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -83,11 +93,11 @@ function convexUpsert(string $baseUrl, array $args): bool {
     curl_close($ch);
 
     if ($curlErr) {
-        fwrite(STDERR, "  [curl error] {$curlErr}\n");
+        fwrite(STDERR, "  [curl error] " . $curlErr . "\n");
         return false;
     }
     if ($httpCode < 200 || $httpCode >= 300) {
-        fwrite(STDERR, "  [http {$httpCode}] {$resp}\n");
+        fwrite(STDERR, "  [http " . $httpCode . "] " . $resp . "\n");
         return false;
     }
     return true;
@@ -100,7 +110,7 @@ set_time_limit(0);
 
 $stmt = $db->prepare("SELECT * FROM prod_activ WHERE ID > ? ORDER BY ID ASC");
 if (!$stmt) {
-    fwrite(STDERR, "[fatal] Prepare failed: {$db->error}\n");
+    fwrite(STDERR, "[fatal] Prepare failed: " . $db->error . "\n");
     exit(1);
 }
 
@@ -108,7 +118,11 @@ while (true) {
     $stmt->bind_param('i', $lastMaxId);
     $stmt->execute();
     $result = $stmt->get_result();
-    $rows   = $result->fetch_all(MYSQLI_ASSOC);
+
+    $rows = array();
+    while ($r = $result->fetch_assoc()) {
+        $rows[] = $r;
+    }
     $result->free();
 
     if (count($rows) > 0) {
@@ -116,33 +130,33 @@ while (true) {
 
         foreach ($rows as $r) {
             $id   = (int)$r['ID'];
-            $args = [
+            $args = array(
                 'mysql_id'   => $id,
-                'Stoka'      => $r['Stoka']      !== null ? (string)$r['Stoka']     : null,
-                'Br'         => $r['Br']         !== null ? num($r['Br'])            : null,
-                'Cena'       => $r['Cena']       !== null ? num($r['Cena'])          : null,
-                'masa'       => $r['masa']       !== null ? num($r['masa'])          : null,
-                'Miasto'     => (string)($r['Miasto'] ?? ''),
-                'Servitior'  => $r['Servitior']  !== null ? (string)$r['Servitior'] : null,
-                'SmetkaN'    => $r['SmetkaN']    !== null ? num($r['SmetkaN'])       : null,
-                'Data'       => $r['Data']       !== null ? (string)$r['Data']      : null,
-                'Time'       => $r['Time']       !== null ? (string)$r['Time']      : null,
-                'Time2'      => $r['Time2']      !== null ? (string)$r['Time2']     : null,
-                'Zaiavka'    => $r['Zaiavka']    !== null ? (string)$r['Zaiavka']   : null,
-                'Status'     => $r['Status']     !== null ? num($r['Status'])        : null,
-                'Platena'    => $r['Platena']    !== null ? num($r['Platena'])       : null,
-                'Otchetena'  => $r['Otchetena']  !== null ? num($r['Otchetena'])    : null,
-                'Porcent'    => $r['Porcent']    !== null ? num($r['Porcent'])       : null,
-                'IDNap'      => $r['IDNap']      !== null ? num($r['IDNap'])         : null,
-                'ID_Stoca'   => $r['ID_Stoca']   !== null ? num($r['ID_Stoca'])      : null,
-                'Suplimente' => $r['Suplimente'] !== null ? num($r['Suplimente'])    : null,
-            ];
+                'Stoka'      => nullStr($r['Stoka']),
+                'Br'         => toNum($r['Br']),
+                'Cena'       => toNum($r['Cena']),
+                'masa'       => toNum($r['masa']),
+                'Miasto'     => isset($r['Miasto']) ? (string)$r['Miasto'] : '',
+                'Servitior'  => nullStr($r['Servitior']),
+                'SmetkaN'    => toNum($r['SmetkaN']),
+                'Data'       => nullStr($r['Data']),
+                'Time'       => nullStr($r['Time']),
+                'Time2'      => nullStr($r['Time2']),
+                'Zaiavka'    => nullStr($r['Zaiavka']),
+                'Status'     => toNum($r['Status']),
+                'Platena'    => toNum($r['Platena']),
+                'Otchetena'  => toNum($r['Otchetena']),
+                'Porcent'    => toNum($r['Porcent']),
+                'IDNap'      => toNum($r['IDNap']),
+                'ID_Stoca'   => toNum($r['ID_Stoca']),
+                'Suplimente' => toNum($r['Suplimente']),
+            );
 
             if (convexUpsert($CONVEX_URL, $args)) {
-                echo "  → upserted ID {$id}\n";
+                echo "  -> upserted ID " . $id . "\n";
                 if ($id > $lastMaxId) $lastMaxId = $id;
             } else {
-                fwrite(STDERR, "  [error] failed to upsert ID {$id}, will retry next poll\n");
+                fwrite(STDERR, "  [error] failed to upsert ID " . $id . ", will retry next poll\n");
             }
         }
     }
