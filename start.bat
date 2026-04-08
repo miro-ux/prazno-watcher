@@ -9,7 +9,6 @@ if exist ".git" (
   where git >nul 2>nul
   if not errorlevel 1 (
     echo [mysql-convex-watcher] Pulling latest from git...
-    rem Drop local lockfile so pull never blocks on package-lock.json conflicts
     if exist "package-lock.json" del /q "package-lock.json" 2>nul
     git pull --rebase --autostash
     if errorlevel 1 (
@@ -24,10 +23,32 @@ if exist ".git" (
   echo.
 )
 
+if not exist ".env.local" (
+  echo WARNING: .env.local not found. Copy .env.example to .env.local and fill in CONVEX_URL and MySQL settings.
+  echo.
+)
+
+rem ---------------------------------------------------------------------------
+rem Try PHP first (no Node/npm needed, no auth-plugin issues with MySQL)
+rem ---------------------------------------------------------------------------
+where php >nul 2>nul
+if not errorlevel 1 (
+  echo [mysql-convex-watcher] Starting PHP watcher ^(Ctrl+C to stop^)...
+  echo.
+  php watcher.php
+  set EXIT=%ERRORLEVEL%
+  if not "%EXIT%"=="0" echo ERROR: PHP watcher exited with code %EXIT%.
+  exit /b %EXIT%
+)
+
+rem ---------------------------------------------------------------------------
+rem Fall back to Node.js
+rem ---------------------------------------------------------------------------
 where node >nul 2>nul
 if errorlevel 1 (
-  echo ERROR: Node.js is not installed or not on PATH.
-  echo Install from https://nodejs.org/ then try again.
+  echo ERROR: Neither PHP nor Node.js found on PATH.
+  echo Install PHP from https://windows.php.net/download/ ^(or add to PATH^)
+  echo OR install Node.js from https://nodejs.org/
   exit /b 1
 )
 
@@ -37,12 +58,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if not exist ".env.local" (
-  echo WARNING: .env.local not found. Copy .env.example to .env.local and set CONVEX_URL and MySQL settings.
-  echo.
-)
-
-echo [mysql-convex-watcher] Installing dependencies...
+echo [mysql-convex-watcher] Installing Node dependencies...
 call npm install --no-fund --no-audit
 if errorlevel 1 (
   echo ERROR: npm install failed.
@@ -50,9 +66,9 @@ if errorlevel 1 (
 )
 
 echo.
-echo [mysql-convex-watcher] Starting watcher ^(Ctrl+C to stop^)...
+echo [mysql-convex-watcher] Starting Node watcher ^(Ctrl+C to stop^)...
 echo.
 call npm start
 set EXIT=%ERRORLEVEL%
-if not "%EXIT%"=="0" echo ERROR: Watcher exited with code %EXIT%.
+if not "%EXIT%"=="0" echo ERROR: Node watcher exited with code %EXIT%.
 exit /b %EXIT%
