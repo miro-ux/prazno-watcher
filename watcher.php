@@ -47,13 +47,15 @@ $db->set_charset('utf8mb4');
 echo "[db] Connected to " . $MYSQL_DB . " on " . $MYSQL_HOST . " as " . $MYSQL_USER . "\n";
 
 // ---------------------------------------------------------------------------
-// Init: start from current max ID
+// Init: start from 0 — syncs all existing rows first, then keeps polling
 // ---------------------------------------------------------------------------
-$initResult = $db->query("SELECT MAX(ID) AS maxId FROM prod_activ");
-$initRow    = $initResult->fetch_assoc();
-$lastMaxId  = isset($initRow['maxId']) ? (int)$initRow['maxId'] : 0;
-echo "[convex] Sending to " . $CONVEX_URL . "\n";
-echo "[init] Starting from ID > " . $lastMaxId . "\n";
+$lastMaxId = 0;
+$countResult = $db->query("SELECT COUNT(*) AS cnt, MAX(ID) AS maxId FROM prod_activ");
+$countRow = $countResult->fetch_assoc();
+$totalRows = isset($countRow['cnt']) ? (int)$countRow['cnt'] : 0;
+$maxId = isset($countRow['maxId']) ? (int)$countRow['maxId'] : 0;
+echo "[init] MySQL has " . $totalRows . " rows, highest ID = " . $maxId . "\n";
+echo "[init] Starting full sync from ID 0...\n";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -83,34 +85,51 @@ function convexUpsert($baseUrl, $args) {
         return false;
     }
 
-    $ch = curl_init($baseUrl . '/api/mutation');
-    curl_setopt($ch, CURLOPT_POST,           true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS,     $body);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER,     array('Content-Type: application/json'));
-    curl_setopt($ch, CURLOPT_TIMEOUT,        10);
+    // Use file_get_contents — works without the curl extension
+    $context = stream_context_create(array(
+        'http' => array(
+            'method'        => 'POST',
+            'header'        => "Content-Type: application/json\r\n",
+            'content'       => $body,
+            'timeout'       => 10,
+            'ignore_errors' => true,
+        ),
+        'ssl' => array(
+            'verify_peer'      => false,
+            'verify_peer_name' => false,
+        ),
+    ));
 
-    $resp     = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curlErr  = curl_error($ch);
-    curl_close($ch);
+    $resp = @file_get_contents($baseUrl . '/api/mutation', false, $context);
 
-    if ($curlErr) {
-        fwrite(STDERR, "  [curl error] " . $curlErr . "\n");
+    if ($resp === false) {
+        fwrite(STDERR, "  [http error] request failed\n");
         return false;
     }
-    if ($httpCode < 200 || $httpCode >= 300) {
-        fwrite(STDERR, "  [http " . $httpCode . "] " . $resp . "\n");
+
+    // Check HTTP status from response headers
+    $status = 0;
+    if (isset($http_response_header)) {
+        foreach ($http_response_header as $h) {
+            if (preg_match('#^HTTP/\S+\s+(\d+)#', $h, $m)) {
+                $status = (int)$m[1];
+            }
+        }
+    }
+
+    if ($status < 200 || $status >= 300) {
+        fwrite(STDERR, "  [http " . $status . "] " . $resp . "\n");
         return false;
     }
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// Poll loop — uses query() with integer cast; no get_result() needed
-// (get_result() requires mysqlnd which old XAMPP/libmysql doesn't have)
+// Poll loop — uses query() with integer cast; no get_result()/mysqlnd needed
 // ---------------------------------------------------------------------------
 set_time_limit(0);
+
+$totalSynced = 0;
 
 while (true) {
     $safeId = (int)$lastMaxId;
@@ -127,7 +146,7 @@ while (true) {
     }
 
     if (count($rows) > 0) {
-        echo "[sync] " . count($rows) . " new row(s) found\n";
+        echo "[sync] " . count($rows) . " new row(s) found (total synced: " . $totalSynced . " / " . $maxId . ")\n";
 
         foreach ($rows as $r) {
             $id   = (int)$r['ID'];
@@ -154,7 +173,8 @@ while (true) {
             );
 
             if (convexUpsert($CONVEX_URL, $args)) {
-                echo "  -> upserted ID " . $id . "\n";
+                $totalSynced++;
+                echo "  -> upserted ID " . $id . " (total: " . $totalSynced . ")\n";
                 if ($id > $lastMaxId) $lastMaxId = $id;
             } else {
                 fwrite(STDERR, "  [error] failed to upsert ID " . $id . ", will retry next poll\n");
