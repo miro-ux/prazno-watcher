@@ -136,65 +136,101 @@ function convexQuery($baseUrl, $path, $args) {
 // ---------------------------------------------------------------------------
 set_time_limit(0);
 
-$totalSynced   = 0;
-$pollCount     = 0;
-$DELETE_CHECK_EVERY = (int) env('DELETE_CHECK_EVERY', '10'); // check deletes every N polls
+$totalSynced        = 0;
+$pollCount          = 0;
+$FULL_SYNC_EVERY    = (int) env('FULL_SYNC_EVERY', '10');     // full table re-sync every N polls
+$DELETE_CHECK_EVERY = (int) env('DELETE_CHECK_EVERY', '10');   // check deletes every N polls
+$initialSyncDone    = false;
+
+// Build payload from a MySQL row
+function rowToArgs($r) {
+    return array(
+        'mysql_id'   => (int)$r['ID'],
+        'Stoka'      => nullStr($r['Stoka']),
+        'Br'         => toNum($r['Br']),
+        'Cena'       => toNum($r['Cena']),
+        'masa'       => toNum($r['masa']),
+        'Miasto'     => isset($r['Miasto']) ? (string)$r['Miasto'] : '',
+        'Servitior'  => nullStr($r['Servitior']),
+        'SmetkaN'    => toNum($r['SmetkaN']),
+        'Data'       => nullStr($r['Data']),
+        'Time'       => nullStr($r['Time']),
+        'Time2'      => nullStr($r['Time2']),
+        'Zaiavka'    => nullStr($r['Zaiavka']),
+        'Status'     => toNum($r['Status']),
+        'Platena'    => toNum($r['Platena']),
+        'Otchetena'  => toNum($r['Otchetena']),
+        'Porcent'    => toNum($r['Porcent']),
+        'IDNap'      => toNum($r['IDNap']),
+        'ID_Stoca'   => toNum($r['ID_Stoca']),
+        'Suplimente' => toNum($r['Suplimente']),
+    );
+}
 
 while (true) {
     $pollCount++;
 
-    // --- 1. Upsert new / changed rows ---
-    $safeId = (int)$lastMaxId;
-    $result = $db->query("SELECT * FROM prod_activ WHERE ID > " . $safeId . " ORDER BY ID ASC");
+    // --- 1. Full table sync (initial boot + every N polls to catch updates) ---
+    if (!$initialSyncDone || $pollCount % $FULL_SYNC_EVERY === 0) {
+        $label = $initialSyncDone ? 'resync' : 'init-sync';
+        $result = $db->query("SELECT * FROM prod_activ ORDER BY ID ASC");
 
-    $rows = array();
-    if ($result) {
-        while ($r = $result->fetch_assoc()) {
-            $rows[] = $r;
+        $rows = array();
+        if ($result) {
+            while ($r = $result->fetch_assoc()) {
+                $rows[] = $r;
+            }
+            $result->free();
         }
-        $result->free();
+
+        if (count($rows) > 0) {
+            echo "[" . $label . "] " . count($rows) . " row(s) to upsert\n";
+            foreach ($rows as $r) {
+                $id   = (int)$r['ID'];
+                $args = rowToArgs($r);
+                if (convexMutation($CONVEX_URL, 'prod_activ:upsert', $args)) {
+                    $totalSynced++;
+                    if ($id > $lastMaxId) $lastMaxId = $id;
+                } else {
+                    fwrite(STDERR, "  [error] failed to upsert ID " . $id . "\n");
+                }
+            }
+            echo "[" . $label . "] Done (" . count($rows) . " rows, lastMaxId = " . $lastMaxId . ")\n";
+        }
+        $initialSyncDone = true;
+
     } else {
-        fwrite(STDERR, "[error] Query failed: " . $db->error . "\n");
-    }
+        // --- 2. Incremental: only new rows since last seen ID ---
+        $safeId = (int)$lastMaxId;
+        $result = $db->query("SELECT * FROM prod_activ WHERE ID > " . $safeId . " ORDER BY ID ASC");
 
-    if (count($rows) > 0) {
-        echo "[sync] " . count($rows) . " new row(s) found (total synced: " . $totalSynced . " / " . $maxId . ")\n";
+        $rows = array();
+        if ($result) {
+            while ($r = $result->fetch_assoc()) {
+                $rows[] = $r;
+            }
+            $result->free();
+        } else {
+            fwrite(STDERR, "[error] Query failed: " . $db->error . "\n");
+        }
 
-        foreach ($rows as $r) {
-            $id   = (int)$r['ID'];
-            $args = array(
-                'mysql_id'   => $id,
-                'Stoka'      => nullStr($r['Stoka']),
-                'Br'         => toNum($r['Br']),
-                'Cena'       => toNum($r['Cena']),
-                'masa'       => toNum($r['masa']),
-                'Miasto'     => isset($r['Miasto']) ? (string)$r['Miasto'] : '',
-                'Servitior'  => nullStr($r['Servitior']),
-                'SmetkaN'    => toNum($r['SmetkaN']),
-                'Data'       => nullStr($r['Data']),
-                'Time'       => nullStr($r['Time']),
-                'Time2'      => nullStr($r['Time2']),
-                'Zaiavka'    => nullStr($r['Zaiavka']),
-                'Status'     => toNum($r['Status']),
-                'Platena'    => toNum($r['Platena']),
-                'Otchetena'  => toNum($r['Otchetena']),
-                'Porcent'    => toNum($r['Porcent']),
-                'IDNap'      => toNum($r['IDNap']),
-                'ID_Stoca'   => toNum($r['ID_Stoca']),
-                'Suplimente' => toNum($r['Suplimente']),
-            );
-
-            if (convexMutation($CONVEX_URL, 'prod_activ:upsert', $args)) {
-                $totalSynced++;
-                echo "  -> upserted ID " . $id . " (total: " . $totalSynced . ")\n";
-                if ($id > $lastMaxId) $lastMaxId = $id;
-            } else {
-                fwrite(STDERR, "  [error] failed to upsert ID " . $id . ", will retry next poll\n");
+        if (count($rows) > 0) {
+            echo "[sync] " . count($rows) . " new row(s)\n";
+            foreach ($rows as $r) {
+                $id   = (int)$r['ID'];
+                $args = rowToArgs($r);
+                if (convexMutation($CONVEX_URL, 'prod_activ:upsert', $args)) {
+                    $totalSynced++;
+                    echo "  -> upserted ID " . $id . "\n";
+                    if ($id > $lastMaxId) $lastMaxId = $id;
+                } else {
+                    fwrite(STDERR, "  [error] failed to upsert ID " . $id . ", will retry next poll\n");
+                }
             }
         }
     }
 
-    // --- 2. Soft-delete: check every N polls for rows deleted from MySQL ---
+    // --- 3. Soft-delete: check every N polls for rows deleted from MySQL ---
     if ($pollCount % $DELETE_CHECK_EVERY === 0) {
         $convexIds = convexQuery($CONVEX_URL, 'prod_activ:listActiveMysqlIds', array());
 
@@ -207,7 +243,6 @@ while (true) {
         }
 
         if (is_array($activeInConvex) && count($activeInConvex) > 0) {
-            // Get all current MySQL IDs as a lookup set
             $mysqlIdResult = $db->query("SELECT ID FROM prod_activ");
             $mysqlIds = array();
             if ($mysqlIdResult) {
@@ -220,11 +255,12 @@ while (true) {
             $archiveCount = 0;
             foreach ($activeInConvex as $cid) {
                 $cid = (int)$cid;
+                if ($cid === 0) continue; // skip legacy zero-ID rows
                 if (!isset($mysqlIds[$cid])) {
                     $res = convexMutation($CONVEX_URL, 'prod_activ:softDelete', array('mysql_id' => $cid));
                     if ($res !== false) {
                         $archiveCount++;
-                        echo "  [archive] soft-deleted mysql_id " . $cid . " (removed from MySQL)\n";
+                        echo "  [archive] soft-deleted mysql_id " . $cid . "\n";
                     }
                 }
             }
