@@ -23,5 +23,6 @@ export default defineSchema({
     ID_Stoca: v.optional(v.number()),
     Suplimente: v.optional(v.number()),
     _archived: v.optional(v.boolean()),
+    _archivedAt: v.optional(v.number()),
   }).index("by_mysql_id", ["mysql_id"]),
 });

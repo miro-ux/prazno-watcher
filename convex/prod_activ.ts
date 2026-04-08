@@ -30,7 +30,7 @@ export const upsert = mutation({
       .unique();
 
     if (existing) {
-      await ctx.db.patch(existing._id, { ...args, _archived: false });
+      await ctx.db.patch(existing._id, { ...args, _archived: false, _archivedAt: undefined });
     } else {
       await ctx.db.insert("prod_activ", { ...args, _archived: false });
     }
@@ -56,7 +56,10 @@ export const softDelete = mutation({
       .unique();
 
     if (existing && existing._archived !== true) {
-      await ctx.db.patch(existing._id, { _archived: true });
+      await ctx.db.patch(existing._id, {
+        _archived: true,
+        _archivedAt: Date.now(),
+      });
       return true;
     }
     return false;
