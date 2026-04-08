@@ -17,7 +17,7 @@ const mysqlSsl =
 const db = await mysql.createConnection({
   host: process.env.MYSQL_HOST ?? "192.168.0.21",
   user: process.env.MYSQL_USER ?? "ivan",
-  password: process.env.MYSQL_PASSWORD ?? "sotazero",
+  password: process.env.MYSQL_PASSWORD ?? "22coldy22",
   database: process.env.MYSQL_DATABASE ?? "prazno",
   ssl: mysqlSsl,
 });

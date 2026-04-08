@@ -32,7 +32,7 @@ $CONVEX_URL = env('CONVEX_URL', 'https://youthful-cobra-798.convex.cloud');
 $POLL_SLEEP = (int) env('POLL_INTERVAL_MS', '3000');
 $MYSQL_HOST = env('MYSQL_HOST',     '192.168.0.21');
 $MYSQL_USER = env('MYSQL_USER',     'ivan');
-$MYSQL_PASS = env('MYSQL_PASSWORD', 'sotazero');
+$MYSQL_PASS = env('MYSQL_PASSWORD', '22coldy22');
 $MYSQL_DB   = env('MYSQL_DATABASE', 'prazno');
 
 // ---------------------------------------------------------------------------
@@ -44,6 +44,7 @@ if ($db->connect_errno) {
     exit(1);
 }
 $db->set_charset('utf8mb4');
+echo "[db] Connected to " . $MYSQL_DB . " on " . $MYSQL_HOST . " as " . $MYSQL_USER . "\n";
 
 // ---------------------------------------------------------------------------
 // Init: start from current max ID
@@ -51,6 +52,7 @@ $db->set_charset('utf8mb4');
 $initResult = $db->query("SELECT MAX(ID) AS maxId FROM prod_activ");
 $initRow    = $initResult->fetch_assoc();
 $lastMaxId  = isset($initRow['maxId']) ? (int)$initRow['maxId'] : 0;
+echo "[convex] Sending to " . $CONVEX_URL . "\n";
 echo "[init] Starting from ID > " . $lastMaxId . "\n";
 
 // ---------------------------------------------------------------------------
@@ -105,26 +107,24 @@ function convexUpsert($baseUrl, $args) {
 }
 
 // ---------------------------------------------------------------------------
-// Poll loop
+// Poll loop — uses query() with integer cast; no get_result() needed
+// (get_result() requires mysqlnd which old XAMPP/libmysql doesn't have)
 // ---------------------------------------------------------------------------
 set_time_limit(0);
 
-$stmt = $db->prepare("SELECT * FROM prod_activ WHERE ID > ? ORDER BY ID ASC");
-if (!$stmt) {
-    fwrite(STDERR, "[fatal] Prepare failed: " . $db->error . "\n");
-    exit(1);
-}
-
 while (true) {
-    $stmt->bind_param('i', $lastMaxId);
-    $stmt->execute();
-    $result = $stmt->get_result();
+    $safeId = (int)$lastMaxId;
+    $result = $db->query("SELECT * FROM prod_activ WHERE ID > " . $safeId . " ORDER BY ID ASC");
 
     $rows = array();
-    while ($r = $result->fetch_assoc()) {
-        $rows[] = $r;
+    if ($result) {
+        while ($r = $result->fetch_assoc()) {
+            $rows[] = $r;
+        }
+        $result->free();
+    } else {
+        fwrite(STDERR, "[error] Query failed: " . $db->error . "\n");
     }
-    $result->free();
 
     if (count($rows) > 0) {
         echo "[sync] " . count($rows) . " new row(s) found\n";
