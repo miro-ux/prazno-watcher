@@ -76,35 +76,35 @@ function convexPost($url, $payload) {
         return false;
     }
 
-    $tmpIn  = tempnam(sys_get_temp_dir(), 'cvx');
-    $tmpOut = tempnam(sys_get_temp_dir(), 'cvr');
+    $tmpIn = tempnam(sys_get_temp_dir(), 'cvx');
     file_put_contents($tmpIn, $body);
 
-    $cmd = 'curl.exe -s -w "\n%{http_code}" '
+    // -s silent, -w appends |||HTTP_CODE after body, all in one shell_exec call
+    $cmd = 'curl.exe -s '
          . '-X POST '
          . '-H "Content-Type: application/json" '
          . '-d @' . escapeshellarg(str_replace('/', '\\', $tmpIn)) . ' '
          . '--max-time 15 '
-         . '-o ' . escapeshellarg(str_replace('/', '\\', $tmpOut)) . ' '
-         . escapeshellarg($url)
-         . ' 2>&1';
+         . '-w "|||%{http_code}" '
+         . escapeshellarg($url);
 
-    $output = array();
-    $exitCode = 0;
-    exec($cmd, $output, $exitCode);
+    $raw = shell_exec($cmd);
     @unlink($tmpIn);
 
-    $respBody = @file_get_contents($tmpOut);
-    @unlink($tmpOut);
+    if ($raw === null) $raw = '';
 
-    $httpCode = isset($output[0]) ? (int)trim($output[0]) : 0;
-
-    if ($exitCode !== 0) {
-        fwrite(STDERR, "  [curl.exe exit " . $exitCode . "] " . implode(' ', $output) . "\n");
-        return false;
+    // Split response body from http code using ||| delimiter
+    $delimPos = strrpos($raw, '|||');
+    if ($delimPos !== false) {
+        $respBody = substr($raw, 0, $delimPos);
+        $httpCode = (int)trim(substr($raw, $delimPos + 3));
+    } else {
+        $respBody = $raw;
+        $httpCode = 0;
     }
+
     if ($httpCode < 200 || $httpCode >= 300) {
-        fwrite(STDERR, "  [http " . $httpCode . "] " . $respBody . "\n");
+        fwrite(STDERR, "  [http " . $httpCode . "] " . trim($respBody) . "\n");
         return false;
     }
 
