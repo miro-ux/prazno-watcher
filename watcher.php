@@ -11,7 +11,8 @@ if (file_exists($envFile)) {
         if ($line === '' || $line[0] === '#' || strpos($line, '=') === false) continue;
         $parts = explode('=', $line, 2);
         $key   = trim($parts[0]);
-        $val   = trim(explode('#', $parts[1], 2)[0]);
+        $tmp   = explode('#', $parts[1], 2);
+        $val   = trim($tmp[0]);
         if ($key !== '' && !isset($_ENV[$key])) {
             putenv($key . '=' . $val);
             $_ENV[$key] = $val;
