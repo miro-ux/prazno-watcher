@@ -1,25 +1,26 @@
 <?php
-declare(strict_types=1);
+// PHP 5.3+ compatible — uses curl.exe for HTTP, batch mutations for speed
 
 // ---------------------------------------------------------------------------
 // Load .env.local
 // ---------------------------------------------------------------------------
-$envFile = __DIR__ . '/.env.local';
+$envFile = dirname(__FILE__) . '/.env.local';
 if (file_exists($envFile)) {
     foreach (file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
         $line = trim($line);
-        if ($line === '' || $line[0] === '#' || !str_contains($line, '=')) continue;
-        [$key, $val] = explode('=', $line, 2);
-        $key = trim($key);
-        $val = trim(explode('#', $val, 2)[0]);
+        if ($line === '' || $line[0] === '#' || strpos($line, '=') === false) continue;
+        $parts = explode('=', $line, 2);
+        $key   = trim($parts[0]);
+        $tmp   = explode('#', $parts[1], 2);
+        $val   = trim($tmp[0]);
         if ($key !== '' && !isset($_ENV[$key])) {
-            putenv("$key=$val");
+            putenv($key . '=' . $val);
             $_ENV[$key] = $val;
         }
     }
 }
 
-function env(string $key, string $default = ''): string {
+function env($key, $default = '') {
     $v = getenv($key);
     return ($v !== false && $v !== '') ? $v : $default;
 }
@@ -39,113 +40,47 @@ $MYSQL_DB   = env('MYSQL_DATABASE', 'prazno');
 // ---------------------------------------------------------------------------
 $db = new mysqli($MYSQL_HOST, $MYSQL_USER, $MYSQL_PASS, $MYSQL_DB);
 if ($db->connect_errno) {
-    fwrite(STDERR, "[fatal] MySQL connect failed: {$db->connect_error}\n");
+    fwrite(STDERR, "[fatal] MySQL connect failed: " . $db->connect_error . "\n");
     exit(1);
 }
 $db->set_charset('utf8mb4');
-echo "[db] Connected to {$MYSQL_DB} on {$MYSQL_HOST} as {$MYSQL_USER}\n";
-
-// ---------------------------------------------------------------------------
-// Persistent curl handle — reuses TCP + TLS across all requests
-// ---------------------------------------------------------------------------
-$ch = curl_init();
-curl_setopt_array($ch, [
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_POST           => true,
-    CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
-    CURLOPT_TIMEOUT        => 15,
-    CURLOPT_TCP_KEEPALIVE  => 1,
-]);
-
-function convexPost(string $url, array $payload): array|false {
-    global $ch;
-
-    $body = json_encode($payload, JSON_THROW_ON_ERROR);
-
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
-
-    $resp = curl_exec($ch);
-    $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-    if ($resp === false) {
-        fwrite(STDERR, "  [curl] " . curl_error($ch) . "\n");
-        return false;
-    }
-
-    $decoded = json_decode($resp, true);
-
-    if ($code < 200 || $code >= 300) {
-        $msg = $decoded['errorMessage'] ?? $resp;
-        fwrite(STDERR, "  [http {$code}] {$msg}\n");
-        return false;
-    }
-
-    if (is_array($decoded) && ($decoded['status'] ?? '') === 'error') {
-        fwrite(STDERR, "  [convex] " . ($decoded['errorMessage'] ?? 'unknown error') . "\n");
-        return false;
-    }
-
-    return $decoded ?? [];
-}
-
-function convexMutation(string $baseUrl, string $path, array $args): array|false {
-    $args = array_filter($args, fn($v) => $v !== null);
-    return convexPost("{$baseUrl}/api/mutation", [
-        'path'   => $path,
-        'args'   => $args,
-        'format' => 'json',
-    ]);
-}
-
-function convexQuery(string $baseUrl, string $path, array $args = []): array|false {
-    return convexPost("{$baseUrl}/api/query", [
-        'path'   => $path,
-        'args'   => (object) $args,
-        'format' => 'json',
-    ]);
-}
+echo "[db] Connected to " . $MYSQL_DB . " on " . $MYSQL_HOST . " as " . $MYSQL_USER . "\n";
 
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
-echo "[convex] Target: {$CONVEX_URL}\n";
-
-$countRow  = $db->query("SELECT COUNT(*) AS cnt, MAX(ID) AS maxId FROM prod_activ")->fetch_assoc();
-$totalRows = (int) ($countRow['cnt'] ?? 0);
-$maxId     = (int) ($countRow['maxId'] ?? 0);
-
-echo "[init] MySQL has {$totalRows} rows, highest ID = {$maxId}\n";
-
-// Test connectivity
-$test = convexQuery($CONVEX_URL, 'prod_activ:listActiveMysqlIds');
-if ($test === false) {
-    fwrite(STDERR, "[fatal] Cannot reach Convex — check CONVEX_URL\n");
-    exit(1);
-}
-echo "[init] Convex OK (" . count($test['value'] ?? []) . " active rows in Convex)\n";
+$countResult = $db->query("SELECT COUNT(*) AS cnt, MAX(ID) AS maxId FROM prod_activ");
+$countRow = $countResult->fetch_assoc();
+$totalRows = isset($countRow['cnt']) ? (int)$countRow['cnt'] : 0;
+$maxId = isset($countRow['maxId']) ? (int)$countRow['maxId'] : 0;
+echo "[convex] Target: " . $CONVEX_URL . "\n";
+echo "[init] MySQL has " . $totalRows . " rows, highest ID = " . $maxId . "\n";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-function toNum(?string $v): ?float {
-    return $v !== null ? (float) $v : null;
+function toNum($v) {
+    return ($v !== null) ? (float)$v : null;
 }
 
-function rowToArgs(array $r): array {
-    return [
-        'mysql_id'   => (int) $r['ID'],
-        'Stoka'      => $r['Stoka'],
+function nullStr($v) {
+    return ($v !== null) ? (string)$v : null;
+}
+
+function rowToArgs($r) {
+    return array(
+        'mysql_id'   => (int)$r['ID'],
+        'Stoka'      => nullStr($r['Stoka']),
         'Br'         => toNum($r['Br']),
         'Cena'       => toNum($r['Cena']),
         'masa'       => toNum($r['masa']),
-        'Miasto'     => (string) ($r['Miasto'] ?? ''),
-        'Servitior'  => $r['Servitior'],
+        'Miasto'     => isset($r['Miasto']) ? (string)$r['Miasto'] : '',
+        'Servitior'  => nullStr($r['Servitior']),
         'SmetkaN'    => toNum($r['SmetkaN']),
-        'Data'       => $r['Data'],
-        'Time'       => $r['Time'],
-        'Time2'      => $r['Time2'],
-        'Zaiavka'    => $r['Zaiavka'],
+        'Data'       => nullStr($r['Data']),
+        'Time'       => nullStr($r['Time']),
+        'Time2'      => nullStr($r['Time2']),
+        'Zaiavka'    => nullStr($r['Zaiavka']),
         'Status'     => toNum($r['Status']),
         'Platena'    => toNum($r['Platena']),
         'Otchetena'  => toNum($r['Otchetena']),
@@ -153,7 +88,111 @@ function rowToArgs(array $r): array {
         'IDNap'      => toNum($r['IDNap']),
         'ID_Stoca'   => toNum($r['ID_Stoca']),
         'Suplimente' => toNum($r['Suplimente']),
-    ];
+    );
+}
+
+/** POST JSON to Convex via curl.exe. Returns decoded response or false. */
+function convexPost($url, $payload) {
+    $body = json_encode($payload);
+    if ($body === false) {
+        fwrite(STDERR, "  [json error] " . json_last_error_msg() . "\n");
+        return false;
+    }
+
+    $tmpIn = tempnam(sys_get_temp_dir(), 'cvx');
+    file_put_contents($tmpIn, $body);
+    $tmpInWin = str_replace('/', '\\', $tmpIn);
+
+    $cmd = 'curl.exe -s '
+         . '-X POST '
+         . '-H "Content-Type: application/json" '
+         . '-d @' . escapeshellarg($tmpInWin) . ' '
+         . '--max-time 30 '
+         . '-w "|||%{http_code}" '
+         . escapeshellarg($url);
+
+    $raw = shell_exec($cmd);
+    @unlink($tmpIn);
+
+    if ($raw === null) $raw = '';
+
+    $delimPos = strrpos($raw, '|||');
+    if ($delimPos !== false) {
+        $respBody = substr($raw, 0, $delimPos);
+        $httpCode = (int)trim(substr($raw, $delimPos + 3));
+    } else {
+        $respBody = $raw;
+        $httpCode = 0;
+    }
+
+    if ($httpCode < 200 || $httpCode >= 300) {
+        fwrite(STDERR, "  [http " . $httpCode . "] " . trim($respBody) . "\n");
+        return false;
+    }
+
+    $decoded = json_decode($respBody, true);
+
+    if (is_array($decoded) && isset($decoded['status']) && $decoded['status'] === 'error') {
+        $msg = isset($decoded['errorMessage']) ? $decoded['errorMessage'] : 'unknown error';
+        fwrite(STDERR, "  [convex error] " . $msg . "\n");
+        return false;
+    }
+
+    return ($decoded !== null) ? $decoded : true;
+}
+
+function convexMutation($baseUrl, $path, $args) {
+    foreach ($args as $k => $v) {
+        if ($v === null) unset($args[$k]);
+    }
+    return convexPost($baseUrl . '/api/mutation', array(
+        'path'   => $path,
+        'args'   => $args,
+        'format' => 'json',
+    ));
+}
+
+function convexQuery($baseUrl, $path, $args) {
+    return convexPost($baseUrl . '/api/query', array(
+        'path'   => $path,
+        'args'   => (object)$args,
+        'format' => 'json',
+    ));
+}
+
+// Test connectivity
+echo "[init] Testing Convex...\n";
+$test = convexQuery($CONVEX_URL, 'prod_activ:listActiveMysqlIds', array());
+if ($test === false) {
+    fwrite(STDERR, "[fatal] Cannot reach Convex — check CONVEX_URL\n");
+    exit(1);
+}
+$convexCount = 0;
+if (is_array($test) && isset($test['value']) && is_array($test['value'])) {
+    $convexCount = count($test['value']);
+}
+echo "[init] Convex OK (" . $convexCount . " active rows)\n";
+
+// ---------------------------------------------------------------------------
+// Batch helper: strip nulls from each row, send all at once
+// ---------------------------------------------------------------------------
+function batchUpsert($baseUrl, $rows) {
+    if (count($rows) === 0) return true;
+
+    $cleaned = array();
+    foreach ($rows as $r) {
+        $row = array();
+        foreach ($r as $k => $v) {
+            if ($v !== null) $row[$k] = $v;
+        }
+        $cleaned[] = $row;
+    }
+
+    return convexPost($baseUrl . '/api/mutation', array(
+        'path'   => 'prod_activ:batchUpsert',
+        'args'   => array('rows' => $cleaned),
+        'format' => 'json',
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -171,79 +210,126 @@ $initialSyncDone   = false;
 while (true) {
     $pollCount++;
 
-    // --- 1. Full table sync (boot + every N polls to catch updates) ---
+    // --- 1. Full table sync (boot + every N polls) ---
     if (!$initialSyncDone || $pollCount % $FULL_SYNC_EVERY === 0) {
         $label  = $initialSyncDone ? 'resync' : 'init-sync';
         $result = $db->query("SELECT * FROM prod_activ ORDER BY ID ASC");
-        $rows   = $result->fetch_all(MYSQLI_ASSOC);
-        $result->free();
+
+        $rows = array();
+        if ($result) {
+            while ($r = $result->fetch_assoc()) {
+                $rows[] = $r;
+            }
+            $result->free();
+        }
 
         if (count($rows) > 0) {
             $t0 = microtime(true);
-            $count = count($rows);
-            echo "[{$label}] {$count} row(s) to upsert...\n";
-            $ok = 0;
+            $allArgs = array();
             foreach ($rows as $r) {
-                $id = (int) $r['ID'];
-                if (convexMutation($CONVEX_URL, 'prod_activ:upsert', rowToArgs($r)) !== false) {
-                    $ok++;
-                    if ($id > $lastMaxId) $lastMaxId = $id;
-                } else {
-                    fwrite(STDERR, "  [error] upsert ID {$id}\n");
-                }
+                $allArgs[] = rowToArgs($r);
+                $id = (int)$r['ID'];
+                if ($id > $lastMaxId) $lastMaxId = $id;
             }
+
+            echo "[" . $label . "] " . count($rows) . " row(s) — batch upsert...\n";
+            $res = batchUpsert($CONVEX_URL, $allArgs);
             $elapsed = round((microtime(true) - $t0) * 1000);
-            $totalSynced += $ok;
-            echo "[{$label}] Done: {$ok}/{$count} in {$elapsed}ms (lastMaxId = {$lastMaxId})\n";
+
+            if ($res !== false) {
+                $ins = 0; $upd = 0;
+                if (is_array($res) && isset($res['value'])) {
+                    $v = $res['value'];
+                    $ins = isset($v['inserted']) ? $v['inserted'] : 0;
+                    $upd = isset($v['updated']) ? $v['updated'] : 0;
+                }
+                $totalSynced += count($rows);
+                echo "[" . $label . "] Done in " . $elapsed . "ms — " . $ins . " inserted, " . $upd . " updated\n";
+            } else {
+                fwrite(STDERR, "[" . $label . "] Batch upsert FAILED after " . $elapsed . "ms\n");
+            }
         }
         $initialSyncDone = true;
 
     } else {
         // --- 2. Incremental: only new rows ---
-        $result = $db->query("SELECT * FROM prod_activ WHERE ID > {$lastMaxId} ORDER BY ID ASC");
-        $rows   = $result->fetch_all(MYSQLI_ASSOC);
-        $result->free();
+        $safeId = (int)$lastMaxId;
+        $result = $db->query("SELECT * FROM prod_activ WHERE ID > " . $safeId . " ORDER BY ID ASC");
+
+        $rows = array();
+        if ($result) {
+            while ($r = $result->fetch_assoc()) {
+                $rows[] = $r;
+            }
+            $result->free();
+        } else {
+            fwrite(STDERR, "[error] Query failed: " . $db->error . "\n");
+        }
 
         if (count($rows) > 0) {
-            echo "[sync] " . count($rows) . " new row(s)\n";
+            $allArgs = array();
             foreach ($rows as $r) {
-                $id = (int) $r['ID'];
-                if (convexMutation($CONVEX_URL, 'prod_activ:upsert', rowToArgs($r)) !== false) {
-                    $totalSynced++;
-                    echo "  -> upserted ID {$id}\n";
-                    if ($id > $lastMaxId) $lastMaxId = $id;
-                } else {
-                    fwrite(STDERR, "  [error] upsert ID {$id}, will retry\n");
-                }
+                $allArgs[] = rowToArgs($r);
+                $id = (int)$r['ID'];
+                if ($id > $lastMaxId) $lastMaxId = $id;
+            }
+
+            echo "[sync] " . count($rows) . " new row(s) — batch upsert...\n";
+            $t0 = microtime(true);
+            $res = batchUpsert($CONVEX_URL, $allArgs);
+            $elapsed = round((microtime(true) - $t0) * 1000);
+
+            if ($res !== false) {
+                $totalSynced += count($rows);
+                echo "[sync] Done in " . $elapsed . "ms\n";
+            } else {
+                fwrite(STDERR, "[sync] Batch upsert FAILED, will retry\n");
             }
         }
     }
 
     // --- 3. Soft-delete check ---
     if ($pollCount % $DELETE_CHECK_EVERY === 0) {
-        $convexResult = convexQuery($CONVEX_URL, 'prod_activ:listActiveMysqlIds');
-        $activeInConvex = $convexResult['value'] ?? null;
+        $convexIds = convexQuery($CONVEX_URL, 'prod_activ:listActiveMysqlIds', array());
+
+        if (is_array($convexIds) && isset($convexIds['value']) && is_array($convexIds['value'])) {
+            $activeInConvex = $convexIds['value'];
+        } elseif (is_array($convexIds) && !isset($convexIds['value'])) {
+            $activeInConvex = $convexIds;
+        } else {
+            $activeInConvex = null;
+        }
 
         if (is_array($activeInConvex) && count($activeInConvex) > 0) {
-            $mysqlIds = [];
-            $idResult = $db->query("SELECT ID FROM prod_activ");
-            while ($row = $idResult->fetch_assoc()) {
-                $mysqlIds[(int) $row['ID']] = true;
+            $mysqlIdResult = $db->query("SELECT ID FROM prod_activ");
+            $mysqlIds = array();
+            if ($mysqlIdResult) {
+                while ($row = $mysqlIdResult->fetch_assoc()) {
+                    $mysqlIds[(int)$row['ID']] = true;
+                }
+                $mysqlIdResult->free();
             }
-            $idResult->free();
 
-            $archived = 0;
+            $toDelete = array();
             foreach ($activeInConvex as $cid) {
-                $cid = (int) $cid;
+                $cid = (int)$cid;
                 if ($cid === 0) continue;
                 if (!isset($mysqlIds[$cid])) {
-                    if (convexMutation($CONVEX_URL, 'prod_activ:softDelete', ['mysql_id' => $cid]) !== false) {
-                        $archived++;
-                        echo "  [archive] mysql_id {$cid}\n";
-                    }
+                    $toDelete[] = $cid;
                 }
             }
-            if ($archived > 0) echo "[delete-sync] Archived {$archived} row(s)\n";
+
+            if (count($toDelete) > 0) {
+                echo "[delete-sync] " . count($toDelete) . " row(s) to archive — batch...\n";
+                $res = convexMutation($CONVEX_URL, 'prod_activ:batchSoftDelete', array('mysql_ids' => $toDelete));
+                if ($res !== false) {
+                    $cnt = 0;
+                    if (is_array($res) && isset($res['value']) && isset($res['value']['archived'])) {
+                        $cnt = $res['value']['archived'];
+                    }
+                    echo "[delete-sync] Archived " . $cnt . " row(s)\n";
+                }
+            }
         }
     }
 

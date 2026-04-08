@@ -43,11 +43,14 @@ if not exist ".env.local" (
   echo.
 )
 
-rem Try PHP 8+ first, then XAMPP, then PATH
+rem Find PHP — check XAMPP locations, then PATH
 set PHP_EXE=
-for /d %%D in ("C:\php-8*") do if exist "%%D\php.exe" set PHP_EXE=%%D\php.exe
+if exist "C:\xampp\php\php.exe" (
+  set PHP_EXE=C:\xampp\php\php.exe
+) else if exist "C:\xampp\php\php4\php.exe" (
+  set PHP_EXE=C:\xampp\php\php4\php.exe
+)
 if "%PHP_EXE%"=="" where php >nul 2>nul && set PHP_EXE=php
-if "%PHP_EXE%"=="" if exist "C:\xampp\php\php.exe" set PHP_EXE=C:\xampp\php\php.exe
 
 if not "%PHP_EXE%"=="" (
   echo [mysql-convex-watcher] Starting PHP watcher ^(Ctrl+C to stop^)...
