@@ -54,8 +54,14 @@ $countResult = $db->query("SELECT COUNT(*) AS cnt, MAX(ID) AS maxId FROM prod_ac
 $countRow = $countResult->fetch_assoc();
 $totalRows = isset($countRow['cnt']) ? (int)$countRow['cnt'] : 0;
 $maxId = isset($countRow['maxId']) ? (int)$countRow['maxId'] : 0;
+echo "[convex] Target: " . $CONVEX_URL . "\n";
 echo "[init] MySQL has " . $totalRows . " rows, highest ID = " . $maxId . "\n";
 echo "[init] Starting full sync from ID 0...\n";
+
+// Sanity check: test Convex connectivity with a quick POST
+echo "[init] Testing Convex connection...\n";
+$testRaw = shell_exec('curl.exe -s -w "|||%{http_code}" -X POST -H "Content-Type: application/json" -d "{\"path\":\"prod_activ:listActiveMysqlIds\",\"args\":{},\"format\":\"json\"}" ' . escapeshellarg($CONVEX_URL . '/api/query'));
+echo "[init] Raw Convex response: " . $testRaw . "\n";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -70,6 +76,8 @@ function nullStr($v) {
 
 /** POST JSON to Convex via Windows curl.exe. Returns decoded response or false. */
 function convexPost($url, $payload) {
+    static $debugFirst = true;
+
     $body = json_encode($payload);
     if ($body === false) {
         fwrite(STDERR, "  [json error] " . json_last_error_msg() . "\n");
@@ -79,14 +87,22 @@ function convexPost($url, $payload) {
     $tmpIn = tempnam(sys_get_temp_dir(), 'cvx');
     file_put_contents($tmpIn, $body);
 
-    // -s silent, -w appends |||HTTP_CODE after body, all in one shell_exec call
+    $tmpInWin = str_replace('/', '\\', $tmpIn);
+
     $cmd = 'curl.exe -s '
          . '-X POST '
          . '-H "Content-Type: application/json" '
-         . '-d @' . escapeshellarg(str_replace('/', '\\', $tmpIn)) . ' '
+         . '-d @' . escapeshellarg($tmpInWin) . ' '
          . '--max-time 15 '
-         . '-w "|||%{http_code}" '
+         . '-w "|||%%{http_code}" '
          . escapeshellarg($url);
+
+    // Log first call for debugging
+    if ($debugFirst) {
+        echo "[debug] curl cmd: " . $cmd . "\n";
+        echo "[debug] body: " . substr($body, 0, 300) . "\n";
+        $debugFirst = false;
+    }
 
     $raw = shell_exec($cmd);
     @unlink($tmpIn);
@@ -108,7 +124,15 @@ function convexPost($url, $payload) {
         return false;
     }
 
+    // Check for Convex-level errors inside the JSON body
     $decoded = json_decode($respBody, true);
+
+    if (is_array($decoded) && isset($decoded['status']) && $decoded['status'] === 'error') {
+        $msg = isset($decoded['errorMessage']) ? $decoded['errorMessage'] : 'unknown error';
+        fwrite(STDERR, "  [convex error] " . $msg . "\n");
+        return false;
+    }
+
     return ($decoded !== null) ? $decoded : true;
 }
 
