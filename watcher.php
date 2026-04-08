@@ -85,60 +85,35 @@ function convexUpsert($baseUrl, $args) {
         return false;
     }
 
-    // Raw SSL socket — works regardless of allow_url_fopen or curl extension
-    $parts  = parse_url($baseUrl . '/api/mutation');
-    $host   = $parts['host'];
-    $port   = isset($parts['port']) ? (int)$parts['port'] : 443;
-    $path   = isset($parts['path']) ? $parts['path'] : '/';
+    $url = $baseUrl . '/api/mutation';
 
-    $ctx = stream_context_create(array(
-        'ssl' => array(
-            'verify_peer'       => false,
-            'verify_peer_name'  => false,
-        ),
-    ));
+    // Use Windows built-in curl.exe (System32) — no PHP extensions needed at all
+    $tmpFile = tempnam(sys_get_temp_dir(), 'cvx');
+    file_put_contents($tmpFile, $body);
 
-    $errno = 0; $errstr = '';
-    $sock = @stream_socket_client(
-        'ssl://' . $host . ':' . $port,
-        $errno, $errstr, 10,
-        STREAM_CLIENT_CONNECT, $ctx
-    );
+    $cmd = 'curl.exe -s -o NUL -w "%{http_code}" '
+         . '-X POST '
+         . '-H "Content-Type: application/json" '
+         . '-d @' . escapeshellarg(str_replace('/', '\\', $tmpFile)) . ' '
+         . '--max-time 15 '
+         . escapeshellarg($url)
+         . ' 2>&1';
 
-    if (!$sock) {
-        fwrite(STDERR, "  [socket error " . $errno . "] " . $errstr . "\n");
+    $output = array();
+    $exitCode = 0;
+    exec($cmd, $output, $exitCode);
+    @unlink($tmpFile);
+
+    $httpCode = isset($output[0]) ? trim($output[0]) : '0';
+
+    if ($exitCode !== 0) {
+        fwrite(STDERR, "  [curl.exe exit " . $exitCode . "] " . implode(' ', $output) . "\n");
         return false;
     }
 
-    $req = "POST " . $path . " HTTP/1.0\r\n"
-         . "Host: " . $host . "\r\n"
-         . "Content-Type: application/json\r\n"
-         . "Content-Length: " . strlen($body) . "\r\n"
-         . "Connection: close\r\n"
-         . "\r\n"
-         . $body;
-
-    fwrite($sock, $req);
-
-    $raw = '';
-    while (!feof($sock)) {
-        $raw .= fread($sock, 4096);
-    }
-    fclose($sock);
-
-    // Split headers / body
-    $pos      = strpos($raw, "\r\n\r\n");
-    $headers  = $pos !== false ? substr($raw, 0, $pos) : $raw;
-    $respBody = $pos !== false ? substr($raw, $pos + 4) : '';
-
-    // Extract HTTP status
-    $status = 0;
-    if (preg_match('#^HTTP/\S+\s+(\d+)#', $headers, $m)) {
-        $status = (int)$m[1];
-    }
-
-    if ($status < 200 || $status >= 300) {
-        fwrite(STDERR, "  [http " . $status . "] " . trim($respBody) . "\n");
+    $code = (int)$httpCode;
+    if ($code < 200 || $code >= 300) {
+        fwrite(STDERR, "  [http " . $code . "]\n");
         return false;
     }
     return true;
