@@ -94,7 +94,7 @@ function convexPost($url, $payload) {
          . '-H "Content-Type: application/json" '
          . '-d @' . escapeshellarg($tmpInWin) . ' '
          . '--max-time 15 '
-         . '-w "|||%%{http_code}" '
+         . '-w "|||%{http_code}" '
          . escapeshellarg($url);
 
     // Log first call for debugging
