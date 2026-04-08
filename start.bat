@@ -5,6 +5,11 @@ cd /d "%~dp0"
 echo [mysql-convex-watcher] Working directory: %CD%
 echo.
 
+rem ---------------------------------------------------------------------------
+rem Phase 1 (first run): git pull, then relaunch updated script for Phase 2
+rem ---------------------------------------------------------------------------
+if "%1"=="--run" goto :run
+
 if exist ".git" (
   where git >nul 2>nul
   if not errorlevel 1 (
@@ -17,20 +22,28 @@ if exist ".git" (
         echo WARNING: git pull failed; continuing with current files.
       )
     )
+    echo.
   ) else (
     echo WARNING: git not on PATH; skipping pull.
+    echo.
   )
-  echo.
 )
+
+rem Relaunch the (possibly updated) script to actually run the watcher
+call "%~f0" --run
+exit /b %ERRORLEVEL%
+
+rem ---------------------------------------------------------------------------
+rem Phase 2: run the watcher (script is fully up to date by now)
+rem ---------------------------------------------------------------------------
+:run
 
 if not exist ".env.local" (
   echo WARNING: .env.local not found. Copy .env.example to .env.local and fill in CONVEX_URL and MySQL settings.
   echo.
 )
 
-rem ---------------------------------------------------------------------------
-rem Try PHP first (no Node/npm needed, no auth-plugin issues with MySQL)
-rem ---------------------------------------------------------------------------
+rem Try PHP first — uses libmysql, no auth-plugin issues with MySQL 8
 where php >nul 2>nul
 if not errorlevel 1 (
   echo [mysql-convex-watcher] Starting PHP watcher ^(Ctrl+C to stop^)...
@@ -41,13 +54,11 @@ if not errorlevel 1 (
   exit /b %EXIT%
 )
 
-rem ---------------------------------------------------------------------------
 rem Fall back to Node.js
-rem ---------------------------------------------------------------------------
 where node >nul 2>nul
 if errorlevel 1 (
   echo ERROR: Neither PHP nor Node.js found on PATH.
-  echo Install PHP from https://windows.php.net/download/ ^(or add to PATH^)
+  echo Install PHP from https://windows.php.net/download/ and add to PATH
   echo OR install Node.js from https://nodejs.org/
   exit /b 1
 )
