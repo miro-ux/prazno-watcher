@@ -7,7 +7,7 @@ declare(strict_types=1);
 $envFile = __DIR__ . '/.env.local';
 if (file_exists($envFile)) {
     foreach (file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
-        if (str_starts_with(trim($line), '#') || !str_contains($line, '=')) continue;
+        if (strncmp(trim($line), '#', 1) === 0 || strpos($line, '=') === false) continue;
         [$key, $val] = explode('=', $line, 2);
         $key = trim($key);
         $val = trim(explode('#', $val, 2)[0]); // strip inline comments
@@ -60,7 +60,7 @@ function num(?string $v): ?float {
 /** POST a mutation to Convex and return true on success. */
 function convexUpsert(string $baseUrl, array $args): bool {
     // Strip null values — Convex optional fields must be absent, not null
-    $args = array_filter($args, fn($v) => $v !== null);
+    $args = array_filter($args, function($v) { return $v !== null; });
 
     $body = json_encode([
         'path' => 'prod_activ:upsert',

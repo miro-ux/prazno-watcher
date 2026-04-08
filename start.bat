@@ -44,11 +44,22 @@ if not exist ".env.local" (
 )
 
 rem Try PHP first — uses libmysql, no auth-plugin issues with MySQL 8
+rem Check common locations: PATH, XAMPP default, XAMPP php4 subfolder
+set PHP_EXE=
 where php >nul 2>nul
 if not errorlevel 1 (
+  set PHP_EXE=php
+) else if exist "C:\xampp\php\php.exe" (
+  set PHP_EXE=C:\xampp\php\php.exe
+) else if exist "C:\xampp\php\php4\php.exe" (
+  set PHP_EXE=C:\xampp\php\php4\php.exe
+)
+
+if not "%PHP_EXE%"=="" (
   echo [mysql-convex-watcher] Starting PHP watcher ^(Ctrl+C to stop^)...
+  echo Using: %PHP_EXE%
   echo.
-  php watcher.php
+  "%PHP_EXE%" watcher.php
   set EXIT=%ERRORLEVEL%
   if not "%EXIT%"=="0" echo ERROR: PHP watcher exited with code %EXIT%.
   exit /b %EXIT%
