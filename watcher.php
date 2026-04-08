@@ -85,40 +85,60 @@ function convexUpsert($baseUrl, $args) {
         return false;
     }
 
-    // Use file_get_contents — works without the curl extension
-    $context = stream_context_create(array(
-        'http' => array(
-            'method'        => 'POST',
-            'header'        => "Content-Type: application/json\r\n",
-            'content'       => $body,
-            'timeout'       => 10,
-            'ignore_errors' => true,
-        ),
+    // Raw SSL socket — works regardless of allow_url_fopen or curl extension
+    $parts  = parse_url($baseUrl . '/api/mutation');
+    $host   = $parts['host'];
+    $port   = isset($parts['port']) ? (int)$parts['port'] : 443;
+    $path   = isset($parts['path']) ? $parts['path'] : '/';
+
+    $ctx = stream_context_create(array(
         'ssl' => array(
-            'verify_peer'      => false,
-            'verify_peer_name' => false,
+            'verify_peer'       => false,
+            'verify_peer_name'  => false,
         ),
     ));
 
-    $resp = @file_get_contents($baseUrl . '/api/mutation', false, $context);
+    $errno = 0; $errstr = '';
+    $sock = @stream_socket_client(
+        'ssl://' . $host . ':' . $port,
+        $errno, $errstr, 10,
+        STREAM_CLIENT_CONNECT, $ctx
+    );
 
-    if ($resp === false) {
-        fwrite(STDERR, "  [http error] request failed\n");
+    if (!$sock) {
+        fwrite(STDERR, "  [socket error " . $errno . "] " . $errstr . "\n");
         return false;
     }
 
-    // Check HTTP status from response headers
+    $req = "POST " . $path . " HTTP/1.0\r\n"
+         . "Host: " . $host . "\r\n"
+         . "Content-Type: application/json\r\n"
+         . "Content-Length: " . strlen($body) . "\r\n"
+         . "Connection: close\r\n"
+         . "\r\n"
+         . $body;
+
+    fwrite($sock, $req);
+
+    $raw = '';
+    while (!feof($sock)) {
+        $raw .= fread($sock, 4096);
+    }
+    fclose($sock);
+
+    // Split headers / body
+    $pos      = strpos($raw, "\r\n\r\n");
+    $headers  = $pos !== false ? substr($raw, 0, $pos) : $raw;
+    $respBody = $pos !== false ? substr($raw, $pos + 4) : '';
+
+    // Extract HTTP status
     $status = 0;
-    if (isset($http_response_header)) {
-        foreach ($http_response_header as $h) {
-            if (preg_match('#^HTTP/\S+\s+(\d+)#', $h, $m)) {
-                $status = (int)$m[1];
-            }
-        }
+    if (preg_match('#^HTTP/\S+\s+(\d+)#', $headers, $m)) {
+        $status = (int)$m[1];
     }
 
     if ($status < 200 || $status >= 300) {
-        fwrite(STDERR, "  [http " . $status . "] " . $resp . "\n");
+        fwrite(STDERR, "  [http " . $status . "] " . trim($respBody) . "\n");
         return false;
     }
     return true;
