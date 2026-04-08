@@ -19,9 +19,6 @@ const db = await mysql.createConnection({
   user: process.env.MYSQL_USER ?? "ivan",
   password: process.env.MYSQL_PASSWORD ?? "sotazero",
   database: process.env.MYSQL_DATABASE ?? "prazno",
-  // MySQL 8+ caching_sha2_password over TCP often needs this without TLS (typical on LAN).
-  allowPublicKeyRetrieval:
-    process.env.MYSQL_ALLOW_PUBLIC_KEY_RETRIEVAL !== "0",
   ssl: mysqlSsl,
 });
 
