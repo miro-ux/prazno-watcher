@@ -1,5 +1,5 @@
 <?php
-// PHP 5.3+ compatible — uses curl.exe for HTTP, batch mutations for speed
+// PHP 5.3+ compatible — uses curl.exe for HTTP, single fullSync call per poll
 
 // ---------------------------------------------------------------------------
 // Load .env.local
@@ -45,16 +45,7 @@ if ($db->connect_errno) {
 }
 $db->set_charset('utf8mb4');
 echo "[db] Connected to " . $MYSQL_DB . " on " . $MYSQL_HOST . " as " . $MYSQL_USER . "\n";
-
-// ---------------------------------------------------------------------------
-// Init
-// ---------------------------------------------------------------------------
-$countResult = $db->query("SELECT COUNT(*) AS cnt, MAX(ID) AS maxId FROM prod_activ");
-$countRow = $countResult->fetch_assoc();
-$totalRows = isset($countRow['cnt']) ? (int)$countRow['cnt'] : 0;
-$maxId = isset($countRow['maxId']) ? (int)$countRow['maxId'] : 0;
 echo "[convex] Target: " . $CONVEX_URL . "\n";
-echo "[init] MySQL has " . $totalRows . " rows, highest ID = " . $maxId . "\n";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -91,7 +82,7 @@ function rowToArgs($r) {
     );
 }
 
-/** POST JSON to Convex via curl.exe. Returns decoded response or false. */
+/** POST JSON to Convex via curl.exe */
 function convexPost($url, $payload) {
     $body = json_encode($payload);
     if ($body === false) {
@@ -141,196 +132,82 @@ function convexPost($url, $payload) {
     return ($decoded !== null) ? $decoded : true;
 }
 
-function convexMutation($baseUrl, $path, $args) {
-    foreach ($args as $k => $v) {
-        if ($v === null) unset($args[$k]);
-    }
-    return convexPost($baseUrl . '/api/mutation', array(
-        'path'   => $path,
-        'args'   => $args,
-        'format' => 'json',
-    ));
-}
-
-function convexQuery($baseUrl, $path, $args) {
-    return convexPost($baseUrl . '/api/query', array(
-        'path'   => $path,
-        'args'   => (object)$args,
-        'format' => 'json',
-    ));
-}
-
+// ---------------------------------------------------------------------------
 // Test connectivity
+// ---------------------------------------------------------------------------
 echo "[init] Testing Convex...\n";
-$test = convexQuery($CONVEX_URL, 'prod_activ:listActiveMysqlIds', array());
+$test = convexPost($CONVEX_URL . '/api/query', array(
+    'path'   => 'prod_activ:debugInfo',
+    'args'   => (object)array(),
+    'format' => 'json',
+));
 if ($test === false) {
-    fwrite(STDERR, "[fatal] Cannot reach Convex — check CONVEX_URL\n");
+    fwrite(STDERR, "[fatal] Cannot reach Convex\n");
     exit(1);
 }
-$convexCount = 0;
-if (is_array($test) && isset($test['value']) && is_array($test['value'])) {
-    $convexCount = count($test['value']);
-}
-echo "[init] Convex OK (" . $convexCount . " active rows)\n";
+$info = isset($test['value']) ? $test['value'] : array();
+echo "[init] Convex OK — "
+   . (isset($info['total']) ? $info['total'] : '?') . " total, "
+   . (isset($info['active']) ? $info['active'] : '?') . " active, "
+   . (isset($info['archived']) ? $info['archived'] : '?') . " archived\n";
 
 // ---------------------------------------------------------------------------
-// Batch helper: strip nulls from each row, send all at once
-// ---------------------------------------------------------------------------
-function batchUpsert($baseUrl, $rows) {
-    if (count($rows) === 0) return true;
-
-    $cleaned = array();
-    foreach ($rows as $r) {
-        $row = array();
-        foreach ($r as $k => $v) {
-            if ($v !== null) $row[$k] = $v;
-        }
-        $cleaned[] = $row;
-    }
-
-    return convexPost($baseUrl . '/api/mutation', array(
-        'path'   => 'prod_activ:batchUpsert',
-        'args'   => array('rows' => $cleaned),
-        'format' => 'json',
-    ));
-}
-
-// ---------------------------------------------------------------------------
-// Poll loop
+// Poll loop — single fullSync call per cycle
 // ---------------------------------------------------------------------------
 set_time_limit(0);
-
-$lastMaxId         = 0;
-$totalSynced       = 0;
-$pollCount         = 0;
-$FULL_SYNC_EVERY   = (int) env('FULL_SYNC_EVERY', '10');
-$DELETE_CHECK_EVERY = (int) env('DELETE_CHECK_EVERY', '10');
-$initialSyncDone   = false;
+$pollCount = 0;
 
 while (true) {
     $pollCount++;
 
-    // --- 1. Full table sync (boot + every N polls) ---
-    if (!$initialSyncDone || $pollCount % $FULL_SYNC_EVERY === 0) {
-        $label  = $initialSyncDone ? 'resync' : 'init-sync';
-        $result = $db->query("SELECT * FROM prod_activ ORDER BY ID ASC");
-
-        $rows = array();
-        if ($result) {
-            while ($r = $result->fetch_assoc()) {
-                $rows[] = $r;
-            }
-            $result->free();
+    // Read ALL current rows from MySQL
+    $result = $db->query("SELECT * FROM prod_activ ORDER BY ID ASC");
+    $rows = array();
+    if ($result) {
+        while ($r = $result->fetch_assoc()) {
+            $rows[] = $r;
         }
-
-        if (count($rows) > 0) {
-            $t0 = microtime(true);
-            $allArgs = array();
-            foreach ($rows as $r) {
-                $allArgs[] = rowToArgs($r);
-                $id = (int)$r['ID'];
-                if ($id > $lastMaxId) $lastMaxId = $id;
-            }
-
-            echo "[" . $label . "] " . count($rows) . " row(s) — batch upsert...\n";
-            $res = batchUpsert($CONVEX_URL, $allArgs);
-            $elapsed = round((microtime(true) - $t0) * 1000);
-
-            if ($res !== false) {
-                $ins = 0; $upd = 0;
-                if (is_array($res) && isset($res['value'])) {
-                    $v = $res['value'];
-                    $ins = isset($v['inserted']) ? $v['inserted'] : 0;
-                    $upd = isset($v['updated']) ? $v['updated'] : 0;
-                }
-                $totalSynced += count($rows);
-                echo "[" . $label . "] Done in " . $elapsed . "ms — " . $ins . " inserted, " . $upd . " updated\n";
-            } else {
-                fwrite(STDERR, "[" . $label . "] Batch upsert FAILED after " . $elapsed . "ms\n");
-            }
-        }
-        $initialSyncDone = true;
-
+        $result->free();
     } else {
-        // --- 2. Incremental: only new rows ---
-        $safeId = (int)$lastMaxId;
-        $result = $db->query("SELECT * FROM prod_activ WHERE ID > " . $safeId . " ORDER BY ID ASC");
-
-        $rows = array();
-        if ($result) {
-            while ($r = $result->fetch_assoc()) {
-                $rows[] = $r;
-            }
-            $result->free();
-        } else {
-            fwrite(STDERR, "[error] Query failed: " . $db->error . "\n");
-        }
-
-        if (count($rows) > 0) {
-            $allArgs = array();
-            foreach ($rows as $r) {
-                $allArgs[] = rowToArgs($r);
-                $id = (int)$r['ID'];
-                if ($id > $lastMaxId) $lastMaxId = $id;
-            }
-
-            echo "[sync] " . count($rows) . " new row(s) — batch upsert...\n";
-            $t0 = microtime(true);
-            $res = batchUpsert($CONVEX_URL, $allArgs);
-            $elapsed = round((microtime(true) - $t0) * 1000);
-
-            if ($res !== false) {
-                $totalSynced += count($rows);
-                echo "[sync] Done in " . $elapsed . "ms\n";
-            } else {
-                fwrite(STDERR, "[sync] Batch upsert FAILED, will retry\n");
-            }
-        }
+        fwrite(STDERR, "[error] MySQL query failed: " . $db->error . "\n");
+        usleep($POLL_SLEEP * 1000);
+        continue;
     }
 
-    // --- 3. Soft-delete check ---
-    if ($pollCount % $DELETE_CHECK_EVERY === 0) {
-        $convexIds = convexQuery($CONVEX_URL, 'prod_activ:listActiveMysqlIds', array());
-
-        if (is_array($convexIds) && isset($convexIds['value']) && is_array($convexIds['value'])) {
-            $activeInConvex = $convexIds['value'];
-        } elseif (is_array($convexIds) && !isset($convexIds['value'])) {
-            $activeInConvex = $convexIds;
-        } else {
-            $activeInConvex = null;
+    // Build args array (strip nulls from each row)
+    $allArgs = array();
+    foreach ($rows as $r) {
+        $args = rowToArgs($r);
+        $cleaned = array();
+        foreach ($args as $k => $v) {
+            if ($v !== null) $cleaned[$k] = $v;
         }
+        $allArgs[] = $cleaned;
+    }
 
-        if (is_array($activeInConvex) && count($activeInConvex) > 0) {
-            $mysqlIdResult = $db->query("SELECT ID FROM prod_activ");
-            $mysqlIds = array();
-            if ($mysqlIdResult) {
-                while ($row = $mysqlIdResult->fetch_assoc()) {
-                    $mysqlIds[(int)$row['ID']] = true;
-                }
-                $mysqlIdResult->free();
-            }
+    // One call: upsert all + archive anything not in MySQL
+    $t0 = microtime(true);
+    $res = convexPost($CONVEX_URL . '/api/mutation', array(
+        'path'   => 'prod_activ:fullSync',
+        'args'   => array('rows' => $allArgs),
+        'format' => 'json',
+    ));
+    $elapsed = round((microtime(true) - $t0) * 1000);
 
-            $toDelete = array();
-            foreach ($activeInConvex as $cid) {
-                $cid = (int)$cid;
-                if ($cid === 0) continue;
-                if (!isset($mysqlIds[$cid])) {
-                    $toDelete[] = $cid;
-                }
-            }
+    if ($res !== false) {
+        $v = isset($res['value']) ? $res['value'] : array();
+        $ins = isset($v['inserted']) ? $v['inserted'] : 0;
+        $upd = isset($v['updated']) ? $v['updated'] : 0;
+        $arc = isset($v['archived']) ? $v['archived'] : 0;
 
-            if (count($toDelete) > 0) {
-                echo "[delete-sync] " . count($toDelete) . " row(s) to archive — batch...\n";
-                $res = convexMutation($CONVEX_URL, 'prod_activ:batchSoftDelete', array('mysql_ids' => $toDelete));
-                if ($res !== false) {
-                    $cnt = 0;
-                    if (is_array($res) && isset($res['value']) && isset($res['value']['archived'])) {
-                        $cnt = $res['value']['archived'];
-                    }
-                    echo "[delete-sync] Archived " . $cnt . " row(s)\n";
-                }
-            }
+        // Only log when something changed, or on first poll
+        if ($ins > 0 || $arc > 0 || $pollCount === 1) {
+            echo "[sync #" . $pollCount . "] " . count($rows) . " MySQL rows -> "
+               . $ins . " new, " . $upd . " updated, " . $arc . " archived"
+               . " (" . $elapsed . "ms)\n";
         }
+    } else {
+        fwrite(STDERR, "[sync #" . $pollCount . "] FAILED after " . $elapsed . "ms\n");
     }
 
     usleep($POLL_SLEEP * 1000);
