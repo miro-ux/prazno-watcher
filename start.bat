@@ -5,6 +5,9 @@ cd /d "%~dp0"
 echo [mysql-convex-watcher] Working directory: %CD%
 echo.
 
+rem Kill any previous watcher instance
+taskkill /F /IM php.exe >nul 2>nul
+
 rem ---------------------------------------------------------------------------
 rem Phase 1 (first run): git pull, then relaunch updated script for Phase 2
 rem ---------------------------------------------------------------------------
