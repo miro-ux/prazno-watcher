@@ -152,10 +152,11 @@ echo "[init] Convex OK — "
    . (isset($info['archived']) ? $info['archived'] : '?') . " archived\n";
 
 // ---------------------------------------------------------------------------
-// Poll loop — single fullSync call per cycle
+// Poll loop — only call fullSync when MySQL data actually changed
 // ---------------------------------------------------------------------------
 set_time_limit(0);
 $pollCount = 0;
+$lastHash  = '';
 
 while (true) {
     $pollCount++;
@@ -185,6 +186,13 @@ while (true) {
         $allArgs[] = $cleaned;
     }
 
+    // Hash the data — skip Convex call if nothing changed
+    $currentHash = md5(json_encode($allArgs));
+    if ($currentHash === $lastHash) {
+        usleep($POLL_SLEEP * 1000);
+        continue;
+    }
+
     // One call: upsert all + archive anything not in MySQL
     $t0 = microtime(true);
     $res = convexPost($CONVEX_URL . '/api/mutation', array(
@@ -195,17 +203,15 @@ while (true) {
     $elapsed = round((microtime(true) - $t0) * 1000);
 
     if ($res !== false) {
+        $lastHash = $currentHash;  // Only update hash on success
         $v = isset($res['value']) ? $res['value'] : array();
         $ins = isset($v['inserted']) ? $v['inserted'] : 0;
         $upd = isset($v['updated']) ? $v['updated'] : 0;
         $arc = isset($v['archived']) ? $v['archived'] : 0;
 
-        // Only log when something changed, or on first poll
-        if ($ins > 0 || $arc > 0 || $pollCount === 1) {
-            echo "[sync #" . $pollCount . "] " . count($rows) . " MySQL rows -> "
-               . $ins . " new, " . $upd . " updated, " . $arc . " archived"
-               . " (" . $elapsed . "ms)\n";
-        }
+        echo "[sync #" . $pollCount . "] " . count($rows) . " MySQL rows -> "
+           . $ins . " new, " . $upd . " updated, " . $arc . " archived"
+           . " (" . $elapsed . "ms)\n";
     } else {
         fwrite(STDERR, "[sync #" . $pollCount . "] FAILED after " . $elapsed . "ms\n");
     }

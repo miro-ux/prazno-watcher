@@ -26,16 +26,18 @@ const rowValidator = {
 /**
  * Atomic mirror-sync: upsert every row from MySQL, archive anything
  * in Convex whose mysql_id is NOT in the incoming set.
- * One call = Convex becomes an exact mirror of prod_activ.
+ * Only writes rows that actually changed to minimize DB bandwidth.
  */
 export const fullSync = mutation({
   args: { rows: v.array(v.object(rowValidator)) },
   handler: async (ctx, { rows }) => {
     const incomingIds = new Set(rows.map((r) => r.mysql_id));
+    const fields = Object.keys(rowValidator) as (keyof typeof rowValidator)[];
 
-    // Upsert all incoming rows
+    // Upsert only changed rows
     let inserted = 0;
     let updated = 0;
+    let skipped = 0;
     for (const row of rows) {
       const existing = await ctx.db
         .query("prod_activ")
@@ -43,12 +45,20 @@ export const fullSync = mutation({
         .unique();
 
       if (existing) {
-        await ctx.db.patch(existing._id, {
-          ...row,
-          archived: false,
-          archivedAt: undefined,
-        });
-        updated++;
+        // Check if anything actually changed
+        const changed =
+          existing.archived === true ||
+          fields.some((k) => existing[k] !== row[k]);
+        if (changed) {
+          await ctx.db.patch(existing._id, {
+            ...row,
+            archived: false,
+            archivedAt: undefined,
+          });
+          updated++;
+        } else {
+          skipped++;
+        }
       } else {
         await ctx.db.insert("prod_activ", { ...row, archived: false });
         inserted++;
@@ -68,7 +78,7 @@ export const fullSync = mutation({
       }
     }
 
-    return { inserted, updated, archived };
+    return { inserted, updated, archived, skipped };
   },
 });
 
